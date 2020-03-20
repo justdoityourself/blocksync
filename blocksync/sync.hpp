@@ -130,7 +130,7 @@ namespace blocksync
 	public:
 
 		S& Source() { return source; }
-		S& Destination() { return dest; }
+		D& Destination() { return dest; }
 
 		Sync(std::string_view _root, std::string_view source_params, std::string_view dest_params)
 			: source (source_params)

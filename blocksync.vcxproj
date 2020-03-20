@@ -107,7 +107,7 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Test|x64'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>../d8u;../common/cryptopp8.2;../common/lzma19.00;../volstore;../template_db;../volrng;../dircopy;../volsnap;$(IncludePath)</IncludePath>
+    <IncludePath>../d8u;../common/cryptopp8.2;../common/lzma19.00;../volstore;../template_db;../volrng;../dircopy;../volsnap;../minimalhttp;$(IncludePath)</IncludePath>
     <LibraryPath>C:\Users\Andrew\Documents\GitHub\common\cryptopp8.2\CryptoPP\x64\Output\Debug;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -165,10 +165,11 @@
       </PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>TEST_RUNNER;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_WINSOCK_DEPRECATED_NO_WARNINGS;TEST_RUNNER;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
