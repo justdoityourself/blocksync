@@ -6,21 +6,118 @@
 #include <filesystem>
 #include <fstream>
 
+#include "../gsl-lite.hpp"
+
 #include "d8u/transform.hpp"
+#include "d8u/util.hpp"
+
+#include "dircopy/restore.hpp"
+#include "dircopy/delta.hpp"
+#include "tdb/database.hpp"
 
 namespace blocksync
 {
-	template <typename S, typename D> uint64_t sync(uint64_t start, S& s, D& d,bool validate)
+	template <typename S, typename D> uint64_t sync(d8u::util::Statistics &s, uint64_t start, S& store, D& dest,bool validate, size_t T = 1)
 	{
-		return s.EnumerateMap(start, [&](auto block) 
+		auto move = [&](auto block)
 		{
+			d8u::util::dec_scope lock(s.atomic.threads);
+
+			s.atomic.blocks++;
+			s.atomic.read += block.size();
+
 			if (validate && !d8u::transform::validate_block(block))
 				throw std::runtime_error("Block Validation Failed!");
 
-			d.Write(d8u::transform::id_block(block),block);
+			auto id = d8u::transform::id_block(block);
+
+			if (!dest.Is(id))
+			{
+				dest.Write(id, std::move(block));
+				s.atomic.write += block.size();
+			}
+			else
+			{
+				s.atomic.dblocks++;
+				s.atomic.duplicate += block.size();
+			}
+
+			return true;
+		};
+
+		auto result = store.EnumerateMap(start, [&](auto &&block)
+		{
+			if(T == 1)
+				return move(std::move(block));
+
+			d8u::util::fast_wait_inc(s.atomic.threads, T);
+
+			std::thread(move, std::move(block)).detach();
 
 			return true;
 		});
+
+		if(T!=1) d8u::util::fast_wait(s.atomic.threads);
+
+		return result;
+	}
+
+	template <typename S, typename D> void sync_key(d8u::util::Statistics &s, const d8u::transform::DefaultHash & key, S& store, D& dest, bool validate)
+	{
+		auto id = key.Next();
+		auto block = store.Map(id);
+
+		s.atomic.blocks++;
+		s.atomic.read += block.size();
+		
+		if (!block.size())
+			throw std::runtime_error("Block not found");
+
+		if (validate)
+		{
+			auto actual = d8u::transform::id_block(block);
+
+			if(!std::equal(id.begin(),id.end(),actual.begin()))
+				throw std::runtime_error("Mismatched block");
+		}
+
+		if (!dest.Is(id))
+		{
+			dest.Write(id, std::move(block));
+			s.atomic.write += block.size();
+		}
+		else
+		{
+			s.atomic.dblocks++;
+			s.atomic.duplicate += block.size();
+		}
+	}
+
+	template <typename S, typename D> void sync_keys(d8u::util::Statistics& s, const gsl::span<d8u::transform::DefaultHash> keys, S& store, D& dest, bool validate, size_t T = 1)
+	{
+		if (T == 1)
+			for (size_t i = 0; i <keys.size()-1; i++)
+				sync_key(s, keys[i], store, dest, validate);
+		else
+		{
+			std::atomic<size_t> local = 0;
+
+			for (size_t i = 0; i < keys.size() - 1; i++)
+			{
+				d8u::util::fast_wait_inc(s.atomic.threads, T);
+				local++;
+
+				std::thread([&](d8u::transform::DefaultHash key)
+				{
+					d8u::util::dec_scope lock1(s.atomic.threads);
+					d8u::util::dec_scope lock2(local);
+
+					sync_key(s, key, store, dest, validate);
+				}, keys[i]).detach();
+			}
+
+			d8u::util::fast_wait(local);
+		}
 	}
 
 	template<typename S, typename D> class Sync
@@ -44,14 +141,90 @@ namespace blocksync
 			std::filesystem::create_directories(root);
 		}
 
-		void Push(bool validate=true)
+		void Push(d8u::util::Statistics& s,bool validate=true)
 		{
-			set_start( sync( get_start() , source, dest,validate) );
+			set_start( sync( s, get_start() , source, dest,validate) );
 		}
 
-		template <typename T> void Migrate(const T & key, bool validate=true)
+		auto Push( bool validate = true, size_t T = 1)
 		{
-			//Todo move all blocks for a point in time.
+			d8u::util::Statistics s;
+
+			set_start(sync(s,get_start(), source, dest, validate,T));
+
+			return s.direct;
+		}
+
+		template <typename DO> void MigrateFolder(d8u::util::Statistics& s,const d8u::transform::DefaultHash& folder_key, const DO& domain, bool validate=true,size_t F = 1, size_t T = 1)
+		{
+			sync_key(s,folder_key,source,dest,validate);
+
+			auto folder_record = dircopy::restore::block(s, folder_key, source, domain, validate);
+			auto folder_keys = gsl::span<d8u::transform::DefaultHash>((d8u::transform::DefaultHash*)folder_record.data(), folder_record.size() / sizeof(d8u::transform::DefaultHash));
+
+			sync_keys(s, folder_keys, source, dest, validate, T);
+
+			auto database = dircopy::restore::file_memory(s, folder_keys, source, domain, validate, validate);
+
+			tdb::MemoryHashmap db(database);
+
+			{
+				auto [size, time, name, data] = dircopy::delta::Path::DecodeRaw(db.FindObject(domain));
+
+				auto stats = (dircopy::delta::Path::FolderStatistics*)data.data();
+
+				s.direct.target = stats->size;
+			}
+
+			auto file = [&](uint64_t p)
+			{
+				d8u::util::dec_scope lock(s.atomic.files);
+
+				auto [size, time, name, keys] = dircopy::delta::Path::Decode(db.GetObject(p));
+
+				if (!size)
+					return true; //Empty File & Stats block
+
+				if (keys.size() == 1)
+				{
+					auto block = dircopy::restore::file_memory(s, keys, source, domain, validate, validate);
+
+					keys = gsl::span<d8u::transform::DefaultHash>((d8u::transform::DefaultHash*)block.data(),block.size()/sizeof(d8u::transform::DefaultHash));
+					sync_keys(s, keys, source, dest, validate, T);
+				}
+				else
+					sync_keys(s, keys, source, dest, validate, T);
+
+				return true;
+			};
+
+			if (F == 1)
+				db.Iterate([&](uint64_t p)
+				{
+					return file(p);
+				});
+			else
+			{
+				db.Iterate([&](uint64_t p)
+				{
+					d8u::util::fast_wait_inc(s.atomic.files, F);
+
+					std::thread(file, p).detach();
+
+					return true;
+				});
+
+				d8u::util::fast_wait(s.atomic.files);
+			}
+		}
+
+		template <typename DO> auto MigrateFolder(const d8u::transform::DefaultHash& folder_key, const DO& domain, bool validate = true, size_t F = 1, size_t T = 1)
+		{
+			d8u::util::Statistics s;
+
+			MigrateFolder(s, folder_key, domain, validate, F, T);
+
+			return s.direct;
 		}
 
 	private:
