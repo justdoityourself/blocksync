@@ -91,6 +91,7 @@ TEST_CASE("Basic Migrate to Network Sync", "[blocksync::]")
 	}
 
 	std::filesystem::remove_all("resdisk.img");
+	std::filesystem::remove_all("127.0.0.1.cache");
 	std::filesystem::remove_all("testsnap");
 	std::filesystem::remove_all("tempdisk");
 	std::filesystem::remove_all("store1");

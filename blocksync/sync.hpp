@@ -141,9 +141,9 @@ namespace blocksync
 			std::filesystem::create_directories(root);
 		}
 
-		void Push(d8u::util::Statistics& s,bool validate=true)
+		void Push(d8u::util::Statistics& s,bool validate=true, size_t T = 1)
 		{
-			set_start( sync( s, get_start() , source, dest,validate) );
+			set_start( sync( s, get_start() , source, dest,validate,T) );
 		}
 
 		auto Push( bool validate = true, size_t T = 1)
