@@ -13,7 +13,7 @@
 
 #include "dircopy/restore.hpp"
 #include "dircopy/delta.hpp"
-#include "tdb/database.hpp"
+#include "tdb/legacy.hpp"
 
 namespace blocksync
 {
