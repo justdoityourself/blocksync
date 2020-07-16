@@ -17,7 +17,7 @@
 
 namespace blocksync
 {
-	template <typename S, typename D> uint64_t sync(d8u::util::Statistics &s, uint64_t start, S& store, D& dest,bool validate, size_t T = 1)
+	template <typename TH,typename S, typename D> uint64_t sync(d8u::util::Statistics &s, uint64_t start, S& store, D& dest,bool validate, size_t T = 1)
 	{
 		auto move = [&](auto block)
 		{
@@ -26,10 +26,10 @@ namespace blocksync
 			s.atomic.blocks++;
 			s.atomic.read += block.size();
 
-			if (validate && !d8u::transform::validate_block(block))
+			if (validate && !d8u::transform::validate_block<TH>(block))
 				throw std::runtime_error("Block Validation Failed!");
 
-			auto id = d8u::transform::id_block(block);
+			auto id = d8u::transform::id_block<TH>(block);
 
 			if (!dest.Is(id))
 			{
@@ -62,9 +62,9 @@ namespace blocksync
 		return result;
 	}
 
-	template <typename S, typename D> void sync_key(d8u::util::Statistics &s, const d8u::transform::DefaultHash & key, S& store, D& dest, bool validate)
+	template <typename TH, typename S, typename D> void sync_key(d8u::util::Statistics &s, const TH & key, S& store, D& dest, bool validate)
 	{
-		auto id = key.Next();
+		auto id = key.GetNext();
 		auto block = store.Map(id);
 
 		s.atomic.blocks++;
@@ -75,7 +75,7 @@ namespace blocksync
 
 		if (validate)
 		{
-			auto actual = d8u::transform::id_block(block);
+			auto actual = d8u::transform::id_block<TH>(block);
 
 			if(!std::equal(id.begin(),id.end(),actual.begin()))
 				throw std::runtime_error("Mismatched block");
@@ -93,7 +93,7 @@ namespace blocksync
 		}
 	}
 
-	template <typename S, typename D> void sync_keys(d8u::util::Statistics& s, const gsl::span<d8u::transform::DefaultHash> keys, S& store, D& dest, bool validate, size_t T = 1)
+	template <typename TH, typename S, typename D> void sync_keys(d8u::util::Statistics& s, const gsl::span<TH> keys, S& store, D& dest, bool validate, size_t T = 1)
 	{
 		if (T == 1)
 			for (size_t i = 0; i <keys.size()-1; i++)
@@ -107,7 +107,7 @@ namespace blocksync
 				d8u::util::fast_wait_inc(s.atomic.threads, T);
 				local++;
 
-				std::thread([&](d8u::transform::DefaultHash key)
+				std::thread([&](TH key)
 				{
 					d8u::util::dec_scope lock1(s.atomic.threads);
 					d8u::util::dec_scope lock2(local);
@@ -120,7 +120,7 @@ namespace blocksync
 		}
 	}
 
-	template<typename S, typename D> class Sync
+	template<typename TH, typename S, typename D> class Sync
 	{
 		std::filesystem::path root;
 		std::filesystem::path state;
@@ -143,24 +143,24 @@ namespace blocksync
 
 		void Push(d8u::util::Statistics& s,bool validate=true, size_t T = 1)
 		{
-			set_start( sync( s, get_start() , source, dest,validate,T) );
+			set_start( sync<TH>( s, get_start() , source, dest,validate,T) );
 		}
 
 		auto Push( bool validate = true, size_t T = 1)
 		{
 			d8u::util::Statistics s;
 
-			set_start(sync(s,get_start(), source, dest, validate,T));
+			set_start(sync<TH>(s,get_start(), source, dest, validate,T));
 
 			return s.direct;
 		}
 
-		template <typename DO> void MigrateFolder(d8u::util::Statistics& s,const d8u::transform::DefaultHash& folder_key, const DO& domain, bool validate=true,size_t F = 1, size_t T = 1)
+		template < typename DO> void MigrateFolder(d8u::util::Statistics& s,const TH& folder_key, const DO& domain, bool validate=true,size_t F = 1, size_t T = 1)
 		{
 			sync_key(s,folder_key,source,dest,validate);
 
 			auto folder_record = dircopy::restore::block(s, folder_key, source, domain, validate);
-			auto folder_keys = gsl::span<d8u::transform::DefaultHash>((d8u::transform::DefaultHash*)folder_record.data(), folder_record.size() / sizeof(d8u::transform::DefaultHash));
+			auto folder_keys = gsl::span<TH>((TH*)folder_record.data(), folder_record.size() / sizeof(TH));
 
 			sync_keys(s, folder_keys, source, dest, validate, T);
 
@@ -169,9 +169,9 @@ namespace blocksync
 			tdb::MemoryHashmap db(database);
 
 			{
-				auto [size, time, name, data] = dircopy::delta::Path::DecodeRaw(db.FindObject(domain));
+				auto [size, time, name, data] = dircopy::delta::Path<TH>::DecodeRaw(db.FindObject(domain));
 
-				auto stats = (dircopy::delta::Path::FolderStatistics*)data.data();
+				auto stats = (typename dircopy::delta::Path<TH>::FolderStatistics *)data.data();
 
 				s.direct.target = stats->size;
 			}
@@ -180,7 +180,7 @@ namespace blocksync
 			{
 				d8u::util::dec_scope lock(s.atomic.files);
 
-				auto [size, time, name, keys] = dircopy::delta::Path::Decode(db.GetObject(p));
+				auto [size, time, name, keys] = dircopy::delta::Path<TH>::Decode(db.GetObject(p));
 
 				if (!size)
 					return true; //Empty File & Stats block
@@ -189,7 +189,7 @@ namespace blocksync
 				{
 					auto block = dircopy::restore::file_memory(s, keys, source, domain, validate, validate);
 
-					keys = gsl::span<d8u::transform::DefaultHash>((d8u::transform::DefaultHash*)block.data(),block.size()/sizeof(d8u::transform::DefaultHash));
+					keys = gsl::span<TH>((TH*)block.data(),block.size()/sizeof(TH));
 					sync_keys(s, keys, source, dest, validate, T);
 				}
 				else
@@ -218,7 +218,7 @@ namespace blocksync
 			}
 		}
 
-		template <typename DO> auto MigrateFolder(const d8u::transform::DefaultHash& folder_key, const DO& domain, bool validate = true, size_t F = 1, size_t T = 1)
+		template <typename DO> auto MigrateFolder(const TH& folder_key, const DO& domain, bool validate = true, size_t F = 1, size_t T = 1)
 		{
 			d8u::util::Statistics s;
 
